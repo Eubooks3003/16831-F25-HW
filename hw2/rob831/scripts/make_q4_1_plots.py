@@ -65,7 +65,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    base = f"q4_b{args.b}_r{args.lr}"
+    base = f"q4_search_b{args.b}_lr{args.lr}"
 
     variants = [
         ("Plain",            pick_run_dir(args.data_dir, base, need_rtg=False, need_nn=False)),

@@ -37,6 +37,10 @@ class PG_Trainer(object):
         self.params['agent_params'] = agent_params
         self.params['batch_size_initial'] = self.params['batch_size']
 
+        self.params['parallel_collect'] = params['parallel_collect']   # or False for baseline
+        self.params['num_workers'] = params['num_workers']          # try 2, 4, 8 depending on cores
+
+
         ################
         ## RL TRAINER
         ################
@@ -83,6 +87,10 @@ def main():
 
     parser.add_argument('--save_params', action='store_true')
     parser.add_argument('--action_noise_std', type=float, default=0)
+
+    # Parallelism
+    parser.add_argument('--num_workers', type=int, default=1)
+    parser.add_argument('--parallel_collect', type=bool, default=False)
 
     args = parser.parse_args()
 
