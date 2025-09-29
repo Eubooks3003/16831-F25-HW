@@ -87,8 +87,15 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
 
     # query the policy with observation(s) to get selected action(s)
     def get_action(self, obs: np.ndarray) -> np.ndarray:
-        # TODO: get this from hw1
-        raise NotImplementedError
+        if len(obs.shape) > 1:
+            observation = obs
+        else:
+            observation = obs[None]
+
+        observation = ptu.from_numpy(observation)
+        action_distribution = self(observation)
+        action = action_distribution.sample()  # don't bother with rsample
+        return ptu.to_numpy(action)
 
     # update/train this policy
     def update(self, observations, actions, **kwargs):
@@ -101,8 +108,20 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
     # return more flexible objects, such as a
     # `torch.distributions.Distribution` object. It's up to you!
     def forward(self, observation: torch.FloatTensor):
-        # TODO: get this from hw1
-        raise NotImplementedError
+        if self.discrete:
+            logits = self.logits_na(observation)
+            action_distribution = distributions.Categorical(logits=logits)
+            return action_distribution
+        else:
+            batch_mean = self.mean_net(observation)
+            scale_tril = torch.diag(torch.exp(self.logstd))
+            batch_dim = batch_mean.shape[0]
+            batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
+            action_distribution = distributions.MultivariateNormal(
+                batch_mean,
+                scale_tril=batch_scale_tril,
+            )
+            return action_distribution
 
 #####################################################
 #####################################################
@@ -115,36 +134,44 @@ class MLPPolicyPG(MLPPolicy):
 
     def update(self, observations, actions, advantages, q_values=None):
         observations = ptu.from_numpy(observations)
-        actions = ptu.from_numpy(actions)
-        advantages = ptu.from_numpy(advantages)
+        actions      = ptu.from_numpy(actions)
+        advantages   = ptu.from_numpy(advantages)
 
-        # TODO: update the policy using policy gradient
-        # HINT1: Recall that the expression that we want to MAXIMIZE
-            # is the expectation over collected trajectories of:
-            # sum_{t=0}^{T-1} [grad [log pi(a_t|s_t) * (Q_t - b_t)]]
-        # HINT2: you will want to use the `log_prob` method on the distribution returned
-            # by the `forward` method
-        # HINT3: don't forget that `optimizer.step()` MINIMIZES a loss
-        # HINT4: use self.optimizer to optimize the loss. Remember to
-            # 'zero_grad' first
+        # For discrete actions, Categorical.log_prob expects indices (LongTensor, shape [N])
+        if self.discrete:
+            if actions.dtype != torch.long:
+                actions = actions.long()
+            actions = actions.view(-1)
 
-        raise NotImplementedError
+        # ----- Policy gradient step -----
+        dist = self.forward(observations)             # torch.distributions.Distribution
+        logp = dist.log_prob(actions)                 # [N]
+        policy_loss = -(logp * advantages).mean()     # maximize => minimize negative
 
-        if self.nn_baseline:
-            ## TODO: update the neural network baseline using the q_values as
-            ## targets. The q_values should first be normalized to have a mean
-            ## of zero and a standard deviation of one.
+        self.optimizer.zero_grad()
+        policy_loss.backward()
+        self.optimizer.step()
 
-            ## HINT1: use self.baseline_optimizer to optimize the loss used for
-                ## updating the baseline. Remember to 'zero_grad' first
-            ## HINT2: You will need to convert the targets into a tensor using
-                ## ptu.from_numpy before using it in the loss
-            raise NotImplementedError
+        # ----- Optional: baseline regression on normalized returns -----
+        train_log = { 'Training Loss': ptu.to_numpy(policy_loss) }
 
-        train_log = {
-            'Training Loss': ptu.to_numpy(policy_loss),
-        }
+        if self.nn_baseline and q_values is not None:
+            q_values = q_values.astype(np.float32)
+            q_mean, q_std = np.mean(q_values), np.std(q_values) + 1e-8
+            targets = normalize(q_values, q_mean, q_std).astype(np.float32)  # z-scored targets
+
+            targets_t = ptu.from_numpy(targets).view(-1, 1)  # [N,1]
+            preds = self.baseline(observations)              # [N,1]
+            b_loss = self.baseline_loss(preds, targets_t)
+
+            self.baseline_optimizer.zero_grad()
+            b_loss.backward()
+            self.baseline_optimizer.step()
+
+            train_log['Baseline Loss'] = ptu.to_numpy(b_loss)
+
         return train_log
+
 
     def run_baseline_prediction(self, observations):
         """

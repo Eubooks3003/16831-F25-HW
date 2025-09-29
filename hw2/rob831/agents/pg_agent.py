@@ -34,22 +34,26 @@ class PGAgent(BaseAgent):
         self.replay_buffer = ReplayBuffer(1000000)
 
     def train(self, observations, actions, rewards_list, next_observations, terminals):
-
         """
-            Training a PG agent refers to updating its actor using the given observations/actions
-            and the calculated qvals/advantages that come from the seen rewards.
+        Update the PG actor/policy using the given batch and return the train_log.
         """
+        # 1) Monte-Carlo Q-values (aligned with obs/actions order)
+        q_values = self.calculate_q_vals(rewards_list)
 
-        # TODO: update the PG actor/policy using the given batch of data, and
-        # return the train_log obtained from updating the policy
+        # 2) Advantages (handles baseline and optional GAE)
+        advantages = self.estimate_advantage(
+            observations, rewards_list, q_values, terminals
+        )
 
-        # HINT1: use helper functions to compute qvals and advantages
-        # HINT2: look at the MLPPolicyPG class for how to update the policy
-            # and obtain a train_log
-
-        raise NotImplementedError
-
+        # 3) Policy (and baseline) update
+        train_log = self.actor.update(
+            observations=observations,
+            actions=actions,
+            advantages=advantages,
+            q_values=q_values,  # used only if nn_baseline=True
+        )
         return train_log
+
 
 
     def calculate_q_vals(self, rewards_list):
@@ -75,79 +79,56 @@ class PGAgent(BaseAgent):
 
         if not self.reward_to_go:
             #use the whole traj for each timestep
-            raise NotImplementedError
+            q_per_traj = [self._discounted_return(rews) for rews in rewards_list]
 
         # Case 2: reward-to-go PG
         # Estimate Q^{pi}(s_t, a_t) by the discounted sum of rewards starting from t
         else:
-            raise NotImplementedError
+            q_per_traj = [self._discounted_cumsum(rews) for rews in rewards_list]
+        q_values = np.concatenate(q_per_traj, axis=0).astype(np.float32)
 
         return q_values  # return an array
 
     def estimate_advantage(self, obs, rewards_list, q_values, terminals):
-
         """
-            Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
+        Computes advantages by (possibly) using GAE, or subtracting a baseline.
         """
-
-        # Estimate the advantage when nn_baseline is True,
-        # by querying the neural network that you're using to learn the value function
         if self.nn_baseline:
-
-            values_normalized = self.actor.run_baseline_prediction(obs)
-            ## ensure that the value predictions and q_values have the same dimensionality
-            ## to prevent silent broadcasting errors
-            assert values_normalized.ndim == q_values.ndim
-            ## TODO: values were trained with standardized q_values, so ensure
-                ## that the predictions have the same mean and standard deviation as
-                ## the current batch of q_values
-
-            raise NotImplementedError
-            values = TODO
+            # Baseline net predicts *normalized* returns; unnormalize to Q scale
+            v_norm = self.actor.run_baseline_prediction(obs)  # shape [N]
+            q_mean, q_std = np.mean(q_values), np.std(q_values) + 1e-8
+            values = unnormalize(v_norm, q_mean, q_std)       # back to Q scale
 
             if self.gae_lambda is not None:
-                ## append a dummy T+1 value for simpler recursive calculation
-                values = np.append(values, [0])
-
-                ## combine rews_list into a single array
-                rewards = np.concatenate(rewards_list)
-
-                ## create empty numpy array to populate with GAE advantage
-                ## estimates, with dummy T+1 value for simpler recursive calculation
+                # Flatten rewards and prepare arrays
+                rewards = np.concatenate(rewards_list).astype(np.float32)
                 batch_size = obs.shape[0]
-                advantages = np.zeros(batch_size + 1)
 
-                for i in reversed(range(batch_size)):
-                    ## TODO: recursively compute advantage estimates starting from
-                        ## timestep T.
-                    ## HINT 1: use terminals to handle edge cases. terminals[i]
-                        ## is 1 if the state is the last in its trajectory, and
-                        ## 0 otherwise.
-                    ## HINT 2: self.gae_lambda is the lambda value in the
-                        ## GAE formula
-                    raise NotImplementedError
+                # Add a dummy V_{T} for easier indexing; will be masked by terminals
+                values = np.append(values, 0.0).astype(np.float32)
+                terminals = terminals.astype(np.float32)
 
-                # remove dummy advantage
+                advantages = np.zeros(batch_size + 1, dtype=np.float32)
+                # GAE(λ): δ_t = r_t + γ V_{t+1}(1 − done_t) − V_t
+                # A_t = δ_t + γλ(1 − done_t) A_{t+1}
+                for t in range(batch_size - 1, -1, -1):
+                    not_done = 1.0 - terminals[t]
+                    delta = rewards[t] + self.gamma * values[t + 1] * not_done - values[t]
+                    advantages[t] = delta + self.gamma * self.gae_lambda * not_done * advantages[t + 1]
                 advantages = advantages[:-1]
-
             else:
-                ## TODO: compute advantage estimates using q_values, and values as baselines
-                # raise NotImplementedError
-                advantages = TODO
-
-        # Else, just set the advantage to [Q]
+                # Plain baseline: A = Q − V
+                advantages = q_values - values
         else:
             advantages = q_values.copy()
 
-        # Normalize the resulting advantages
         if self.standardize_advantages:
-            ## TODO: standardize the advantages to have a mean of zero
-            ## and a standard deviation of one
-
-            raise NotImplementedError
-            advantages = TODO
+            adv_mean = np.mean(advantages)
+            adv_std = np.std(advantages) + 1e-8
+            advantages = normalize(advantages, adv_mean, adv_std)
 
         return advantages
+
 
     #####################################################
     #####################################################
@@ -164,28 +145,26 @@ class PGAgent(BaseAgent):
 
     def _discounted_return(self, rewards):
         """
-            Helper function
-
-            Input: list of rewards {r_0, r_1, ..., r_t', ... r_T} from a single rollout of length T
-
-            Output: array where each index t contains sum_{t'=0}^T gamma^t' r_{t'}
+        Input: list of rewards r_0, …, r_T-1
+        Output: length-T array where every entry equals sum_{t'=0}^{T-1} γ^{t'} r_{t'}
         """
-
-        # TODO: create discounted_returns
-        raise NotImplementedError
-
+        rewards = np.asarray(rewards, dtype=np.float32)
+        T = rewards.shape[0]
+        discounts = self.gamma ** np.arange(T, dtype=np.float32)
+        total_return = np.sum(discounts * rewards, dtype=np.float32)
+        discounted_returns = np.full(T, total_return, dtype=np.float32)
         return discounted_returns
 
     def _discounted_cumsum(self, rewards):
         """
-            Helper function which
-            -takes a list of rewards {r_0, r_1, ..., r_t', ... r_T},
-            -and returns an array where the entry in each index t' is sum_{t'=t}^T gamma^(t'-t) * r_{t'}
+        Input: list of rewards r_0, …, r_T-1
+        Output: length-T array with entry at t equal to sum_{t'=t}^{T-1} γ^{t'-t} r_{t'}
         """
-
-        # TODO: create `discounted_cumsums`
-        # HINT: it is possible to write a vectorized solution, but a solution
-            # using a for loop is also fine
-        raise NotImplementedError
-
+        rewards = np.asarray(rewards, dtype=np.float32)
+        T = rewards.shape[0]
+        discounted_cumsums = np.zeros(T, dtype=np.float32)
+        running = 0.0
+        for t in range(T - 1, -1, -1):
+            running = rewards[t] + self.gamma * running
+            discounted_cumsums[t] = running
         return discounted_cumsums
