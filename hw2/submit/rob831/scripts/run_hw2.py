@@ -37,9 +37,11 @@ class PG_Trainer(object):
         self.params['agent_params'] = agent_params
         self.params['batch_size_initial'] = self.params['batch_size']
 
-        self.params['parallel_collect'] = params['parallel_collect']   # or False for baseline
-        self.params['num_workers'] = params['num_workers']          # try 2, 4, 8 depending on cores
+        self.params['parallel_collect'] = params['parallel_collect']  
+        self.params['num_workers'] = params['num_workers']   
 
+        self.params['agent_params']['num_gradient_steps'] = params['num_gradient_steps']
+        self.params['agent_params']['update_batch_size'] = params['update_batch_size']     
 
         ################
         ## RL TRAINER
@@ -91,6 +93,10 @@ def main():
     # Parallelism
     parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--parallel_collect', type=bool, default=False)
+
+    # Multiple Gradients
+    parser.add_argument('--num_gradient_steps', type=int, default=1)
+    parser.add_argument('--update_batch_size', type=int, default=None)
 
     args = parser.parse_args()
 

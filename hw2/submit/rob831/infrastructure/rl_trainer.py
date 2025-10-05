@@ -3,9 +3,12 @@ import pickle
 import os
 import sys
 import time
+
+# add near the other imports at the top of the file
 import threading
 import queue
 import math
+
 
 import gym
 from gym import wrappers
@@ -19,7 +22,7 @@ from rob831.infrastructure.action_noise_wrapper import ActionNoiseWrapper
 
 # how many rollouts to save as videos to tensorboard
 MAX_NVIDEO = 2
-MAX_VIDEO_LEN = 40  # we overwrite this in the code below
+MAX_VIDEO_LEN = 40 # we overwrite this in the code below
 
 
 class RL_Trainer(object):
@@ -56,7 +59,7 @@ class RL_Trainer(object):
             self.env = ActionNoiseWrapper(self.env, seed, params['action_noise_std'])
 
         # import plotting (locally if 'obstacles' env)
-        if not (self.params['env_name'] == 'obstacles-rob831-v0'):
+        if not(self.params['env_name']=='obstacles-rob831-v0'):
             import matplotlib
             matplotlib.use('Agg')
 
@@ -73,6 +76,7 @@ class RL_Trainer(object):
         self.params['agent_params']['discrete'] = discrete
 
         # Observation and action sizes
+
         ob_dim = self.env.observation_space.shape if img else self.env.observation_space.shape[0]
         ac_dim = self.env.action_space.n if discrete else self.env.action_space.shape[0]
         self.params['agent_params']['ac_dim'] = ac_dim
@@ -80,13 +84,14 @@ class RL_Trainer(object):
 
         # simulation timestep, will be used for video saving
         if 'model' in dir(self.env):
-            self.fps = 1 / self.env.model.opt.timestep
+            self.fps = 1/self.env.model.opt.timestep
         elif 'env_wrappers' in self.params:
-            self.fps = 30  # not actually used when using the Monitor wrapper
+            self.fps = 30 # This is not actually used when using the Monitor wrapper
         elif 'video.frames_per_second' in self.env.env.metadata.keys():
             self.fps = self.env.env.metadata['video.frames_per_second']
         else:
             self.fps = 10
+
 
         #############
         ## AGENT
@@ -94,38 +99,22 @@ class RL_Trainer(object):
 
         agent_class = self.params['agent_class']
         self.agent = agent_class(self.env, self.params['agent_params'])
-
-    # ---------- Parallel rollout helpers ----------
-
-    def _make_env_like_main(self, seed_offset: int = 0):
-        """Create a fresh env configured like self.env (including noise wrapper)."""
-        env = gym.make(self.params['env_name'])
-        env.seed(self.params['seed'] + int(seed_offset))
-        if self.params.get('action_noise_std', 0) > 0:
-            env = ActionNoiseWrapper(
-                env, self.params['seed'] + int(seed_offset), self.params['action_noise_std']
-            )
-        return env
-
     def _collect_worker(self, timesteps_target, collect_policy, out_q, seed_offset):
-        """Thread worker: collect trajectories until target timesteps, then push to queue."""
+        """Thread worker: collect trajectories until timesteps_target, return (paths, n_steps)."""
         env = self._make_env_like_main(seed_offset)
         paths, timesteps = [], 0
         # collect in chunks roughly equal to episode length to avoid tiny rollouts
         chunk = max(int(self.params['ep_len']), 1)
+        while timesteps < timesteps_target:
+            # request at least 'chunk' timesteps per call
+            pth, n = utils.sample_trajectories(env, collect_policy, chunk, self.params['ep_len'])
+            paths.extend(pth)
+            timesteps += n
+        out_q.put((paths, timesteps))
         try:
-            while timesteps < timesteps_target:
-                pth, n = utils.sample_trajectories(env, collect_policy, chunk, self.params['ep_len'])
-                paths.extend(pth)
-                timesteps += n
-        finally:
-            out_q.put((paths, timesteps))
-            try:
-                env.close()
-            except Exception:
-                pass
-
-    # --------------- Main training loop ---------------
+            env.close()
+        except Exception:
+            pass
 
     def run_training_loop(self, n_iter, collect_policy, eval_policy,
                           initial_expertdata=None, relabel_with_expert=False,
@@ -145,7 +134,7 @@ class RL_Trainer(object):
         self.start_time = time.time()
 
         for itr in range(n_iter):
-            print("\n\n********** Iteration %i ************" % itr)
+            print("\n\n********** Iteration %i ************"%itr)
 
             # decide if videos should be rendered/logged at this iteration
             if itr % self.params['video_log_freq'] == 0 and self.params['video_log_freq'] != -1:
@@ -162,9 +151,9 @@ class RL_Trainer(object):
                 self.log_metrics = False
 
             # collect trajectories, to be used for training
-            training_returns = self.collect_training_trajectories(
-                itr, initial_expertdata, collect_policy, self.params['batch_size']
-            )
+            training_returns = self.collect_training_trajectories(itr,
+                                initial_expertdata, collect_policy,
+                                self.params['batch_size'])
             paths, envsteps_this_batch, train_video_paths = training_returns
             self.total_envsteps += envsteps_this_batch
 
@@ -215,6 +204,7 @@ class RL_Trainer(object):
                 self.env, collect_policy, num_transitions_to_sample, self.params['ep_len'])
         else:
             # --- Parallel collection ---
+            # Divide target timesteps across workers (slightly overprovision per worker)
             per_worker = math.ceil(num_transitions_to_sample / num_workers)
             out_q = queue.Queue()
             threads = []
@@ -241,7 +231,10 @@ class RL_Trainer(object):
             for t in threads:  # ensure clean join
                 t.join()
 
-            # We may overshoot slightly; trainer only uses counts and buffer can take more.
+            # truncate if we slightly overshot the target
+            # (convert list-of-paths to arrays and slice below if needed)
+            # We’ll keep it simple and just pass all collected paths—trainer only
+            # uses the total count to track env steps and the replay buffer can take more.
             paths = agg_paths
 
         train_video_paths = None
@@ -252,12 +245,11 @@ class RL_Trainer(object):
 
         return paths, envsteps_this_batch, train_video_paths
 
+
     def train_agent(self):
         all_logs = []
         for train_step in range(self.params['num_agent_train_steps_per_iter']):
-            ob_batch, ac_batch, re_batch, next_ob_batch, terminal_batch = self.agent.sample(
-                self.params['train_batch_size']
-            )
+            ob_batch, ac_batch, re_batch, next_ob_batch, terminal_batch = self.agent.sample(self.params['train_batch_size'])
             train_log = self.agent.train(ob_batch, ac_batch, re_batch, next_ob_batch, terminal_batch)
             all_logs.append(train_log)
         return all_logs
@@ -273,27 +265,19 @@ class RL_Trainer(object):
 
         # collect eval trajectories, for logging
         print("\nCollecting data for eval...")
-        eval_paths, eval_envsteps_this_batch = utils.sample_trajectories(
-            self.env, eval_policy, self.params['eval_batch_size'], self.params['ep_len']
-        )
+        eval_paths, eval_envsteps_this_batch = utils.sample_trajectories(self.env, eval_policy, self.params['eval_batch_size'], self.params['ep_len'])
 
         # save eval rollouts as videos in tensorboard event file
-        if self.log_video and train_video_paths is not None:
+        if self.log_video and train_video_paths != None:
             print('\nCollecting video rollouts eval')
-            eval_video_paths = utils.sample_n_trajectories(
-                self.env, eval_policy, MAX_NVIDEO, MAX_VIDEO_LEN, True
-            )
+            eval_video_paths = utils.sample_n_trajectories(self.env, eval_policy, MAX_NVIDEO, MAX_VIDEO_LEN, True)
 
-            # save train/eval videos
+            #save train/eval videos
             print('\nSaving train rollouts as videos...')
-            self.logger.log_paths_as_videos(
-                train_video_paths, itr, fps=self.fps, max_videos_to_save=MAX_NVIDEO,
-                video_title='train_rollouts'
-            )
-            self.logger.log_paths_as_videos(
-                eval_video_paths, itr, fps=self.fps, max_videos_to_save=MAX_NVIDEO,
-                video_title='eval_rollouts'
-            )
+            self.logger.log_paths_as_videos(train_video_paths, itr, fps=self.fps, max_videos_to_save=MAX_NVIDEO,
+                                            video_title='train_rollouts')
+            self.logger.log_paths_as_videos(eval_video_paths, itr, fps=self.fps,max_videos_to_save=MAX_NVIDEO,
+                                             video_title='eval_rollouts')
 
         #######################
 
